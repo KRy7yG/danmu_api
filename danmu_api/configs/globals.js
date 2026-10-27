@@ -151,6 +151,54 @@ export const Globals = {
   },
 
   /**
+   * 万能反代（@proxy）：把任意出站 URL 改写成 `<proxy>/<原始URL>`。
+   * 部分源（360/douban/renren/hanjutv）本身不调用 makeProxyUrl，靠这里统一代理；
+   * 已经指向反代的 URL 会被跳过，避免二次包装。
+   */
+  applyUniversalProxy(targetUrl) {
+    const proxyConfig = this.envs.proxyUrl || '';
+    if (!proxyConfig || !targetUrl) return targetUrl;
+    const configs = proxyConfig
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const universal = configs.find((s) => s.startsWith('@'));
+    if (!universal) return targetUrl;
+    const base = universal.substring(1).replace(/\/+$/, '');
+    if (!base) return targetUrl;
+    if (targetUrl.startsWith(base)) return targetUrl;
+
+    // 已经是某个专用反代地址时不要再包一层
+    for (const conf of configs) {
+      const at = conf.indexOf('@');
+      if (at <= 0) continue;
+      const specific = conf.substring(at + 1).replace(/\/+$/, '');
+      if (specific && targetUrl.startsWith(specific)) return targetUrl;
+    }
+
+    let hostname = '';
+    try {
+      hostname = new URL(targetUrl).hostname;
+    } catch (e) {
+      return targetUrl;
+    }
+
+    // 有专用反代键的源交给各源自己的 makeProxyUrl 处理（专用 > 万能）
+    const specificRules = [
+      ['bahamut', (h) => h.includes('gamer.com.tw')],
+      ['tmdb', (h) => h.includes('tmdb')],
+      ['bilibili', (h) => h.includes('bilibili')],
+      ['animeko', (h) => h.includes('animeko') || h.includes('bgm.tv')],
+      ['aiyifan', (h) => /(^|\.)(tripdata\.app|yfsp\.tv)$/.test(h)],
+    ];
+    for (const [key, matches] of specificRules) {
+      if (configs.some((c) => c.startsWith(key + '@')) && matches(hostname)) return targetUrl;
+    }
+
+    return `${base}/${targetUrl}`;
+  },
+
+  /**
    * 获取全局配置快照
    * @returns {Object} 当前全局配置
    */
@@ -178,6 +226,7 @@ export const Globals = {
 
         // 暴露方法
         if (prop === 'makeProxyUrl') return self.makeProxyUrl.bind(self);
+        if (prop === 'applyUniversalProxy') return self.applyUniversalProxy.bind(self);
 
         // 其他属性直接返回
         return self[prop];
