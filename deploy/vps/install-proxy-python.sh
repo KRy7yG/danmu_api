@@ -8,8 +8,16 @@ set -euo pipefail
 
 RAW="${RAW:-https://raw.githubusercontent.com/KRy7yG/danmu_api/main}"
 DIR="${DIR:-/opt/danmu-proxy}"
-PORT="${PORT:-8787}"
+UNIT=/etc/systemd/system/danmu-proxy.service
+# 幂等：重跑时保留已有 SECRET/PORT，否则会把 Vercel 里的 PROXY_URL 弄失效
+if [ -z "${SECRET:-}" ] && [ -f "$UNIT" ]; then
+  SECRET="$(sed -n 's/^Environment=SECRET=//p' "$UNIT" | head -1)"
+fi
+if [ -z "${PORT:-}" ] && [ -f "$UNIT" ]; then
+  PORT="$(sed -n 's/^Environment=PORT=//p' "$UNIT" | head -1)"
+fi
 SECRET="${SECRET:-$(openssl rand -hex 24)}"
+PORT="${PORT:-8787}"
 
 log() { printf '[install] %s\n' "$*"; }
 
@@ -23,9 +31,11 @@ fi
 command -v openssl >/dev/null 2>&1 || apt-get install -y -qq openssl
 
 mkdir -p "$DIR"
-log "下载 python-proxy.py"
+log "下载 python-proxy.py / update.sh"
 curl -fsSL "$RAW/proxy/python-proxy.py" -o "$DIR/python-proxy.py"
+curl -fsSL "$RAW/deploy/vps/update-proxy.sh" -o "$DIR/update.sh"
 chmod 644 "$DIR/python-proxy.py"
+chmod 755 "$DIR/update.sh"
 
 cat >/etc/systemd/system/danmu-proxy.service <<UNIT
 [Unit]
@@ -56,7 +66,8 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c 'curl -fsSL $RAW/proxy/python-proxy.py -o /tmp/danmu-proxy.new || exit 0; if ! cmp -s /tmp/danmu-proxy.new $DIR/python-proxy.py; then install -m 644 /tmp/danmu-proxy.new $DIR/python-proxy.py && systemctl restart danmu-proxy; fi'
+Environment=DEST=$DIR/python-proxy.py
+ExecStart=$DIR/update.sh
 UNIT
 
 cat >/etc/systemd/system/danmu-proxy-update.timer <<UNIT
@@ -74,6 +85,7 @@ UNIT
 
 systemctl daemon-reload
 systemctl enable --now danmu-proxy.service
+systemctl restart danmu-proxy.service
 systemctl enable --now danmu-proxy-update.timer
 sleep 1
 systemctl is-active danmu-proxy.service | sed 's/^/danmu-proxy.service: /'
@@ -95,6 +107,7 @@ Vercel → danmu-api 项目 → Environment Variables：
 存盘后 Redeploy。
 
 自检（在 VPS 上）：
+  curl -s -m 20 "http://127.0.0.1:$PORT/"                       # 应含 version 字段
   curl -s -m 20 "http://127.0.0.1:$PORT/$SECRET/https://api.so.360kan.com/index?force_v=1&kw=%E7%B9%81%E8%8A%B1&pageno=1&v_ap=1&tab=all" | head -c 200
 
 维护：
