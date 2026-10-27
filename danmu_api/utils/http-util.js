@@ -93,7 +93,7 @@ function shouldUseNodeFetch() {
 }
 
 export async function httpGet(url, options = {}) {
-  url = globals.applyUniversalProxy(url);
+  url = globals.applyUniversalProxy(url, sourceLogContext.getStore());
   // 单次搜索请求内 HTTP 响应复用: 若当前请求上下文已激活复用缓存且本 URL 已缓存, 直接返回克隆结果, 跳过重复网络请求
   const requestHttpCache = httpCacheContext.getStore();
   // 重试调用传入 bypassCache 时跳过复用，避免复用首次已缓存的失败响应而令重试被静默吞掉
@@ -331,7 +331,7 @@ export async function httpGet(url, options = {}) {
 }
 
 export async function httpPost(url, body, options = {}) {
-  url = globals.applyUniversalProxy(url);
+  url = globals.applyUniversalProxy(url, sourceLogContext.getStore());
   // 从 options 中获取重试次数，默认为 0
   const maxRetries = parseInt(options.retries || '0', 10) || 0;
   const validStatusCodes = Array.isArray(options.validStatusCodes) ? options.validStatusCodes : [];
@@ -475,7 +475,7 @@ export async function httpPost(url, body, options = {}) {
  * @returns {Promise<{data: any, status: number, headers: Record<string, string>}>}
  */
 async function httpRequestMethod(method, url, body, options = {}) {
-  url = globals.applyUniversalProxy(url);
+  url = globals.applyUniversalProxy(url, sourceLogContext.getStore());
   const currentSource = sourceLogContext.getStore() || "system";
   log("info", `[${currentSource}] [请求模拟] HTTP ${method}: ${url}`);
 

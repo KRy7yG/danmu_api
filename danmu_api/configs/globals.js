@@ -81,6 +81,13 @@ export const Globals = {
     
     if (!proxyConfig || !targetUrl) return targetUrl;
 
+    // 配了 PROXY_ONLY 时，各源不要再自己包一层：交给 http 层按「当前源」决定是否代理，
+    // 否则 makeProxyUrl 会把不该代理的源（如 animeko 节点）也拖进反代。
+    if ((this.envs.proxyOnly || '').trim()) {
+      const hasUniversal = proxyConfig.split(',').map((s) => s.trim()).some((s) => s.startsWith('@'));
+      if (hasUniversal) return targetUrl;
+    }
+
     const configs = proxyConfig.split(',').map(s => s.trim()).filter(s => s);
     let forwardProxy = null;
     let specificProxy = null;
@@ -155,9 +162,22 @@ export const Globals = {
    * 部分源（360/douban/renren/hanjutv）本身不调用 makeProxyUrl，靠这里统一代理；
    * 已经指向反代的 URL 会被跳过，避免二次包装。
    */
-  applyUniversalProxy(targetUrl) {
+  applyUniversalProxy(targetUrl, currentSource) {
     const proxyConfig = this.envs.proxyUrl || '';
     if (!proxyConfig || !targetUrl) return targetUrl;
+
+    // PROXY_ONLY: 只让指定源走反代，其余源保持直连（避免把本来能通的源拖慢）
+    const only = (this.envs.proxyOnly || '')
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
+    if (only.length) {
+      // 源键与日志名不一致的别名叫法都认（360<->360kan, imgo<->mango）
+      const aliases = { '360': '360kan', 'imgo': 'mango', '360kan': '360', 'mango': 'imgo' };
+      const name = String(currentSource || '').toLowerCase();
+      const names = new Set([name, aliases[name]].filter(Boolean));
+      if (![...names].some((n) => only.includes(n))) return targetUrl;
+    }
     const configs = proxyConfig
       .split(',')
       .map((s) => s.trim())
