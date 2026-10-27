@@ -1,44 +1,110 @@
 name: Fork Sync
 
-permissions:
-    contents: write
+# 每天把上游 huangxd-/danmu_api 的 main 同步进本 fork 的 main。
+#
+# 为什么不再用 aormsby/Fork-Sync-With-Upstream-action（旧方案）：
+#   旧方案在 runner 里做 git fetch + git push，推送身份是 GITHUB_TOKEN（GitHub Actions App 的
+#   installation token）。自上游加入 .github/workflows/test.yml 之后，推送被 git 服务器拒绝：
+#     ! [remote rejected] main -> main (refusing to allow a GitHub App to create or update
+#       workflow `.github/workflows/test.yml` without `workflows` permission)
+#   GITHUB_TOKEN 拿不到 workflows 写权限（这是 App 权限的硬限制，不是漏配 permissions），
+#   所以旧方案在"上游改动了 workflow 文件"时会永久失败——即使仓库本身零冲突、零本地提交。
+#
+# 现在的做法：调用 GitHub 官方 fork 同步接口 POST /repos/{owner}/{repo}/merge-upstream，
+# 也就是网页上 "Sync fork" 按钮用的同一个服务端接口。合并在 GitHub 服务端完成，不经过 git push，
+# 因此不受上面那条 App 限制影响，也不需要任何 PAT / secret。
 
 on:
     schedule:
-        - cron: "0 0 * * *"  # 每天午夜执行
-    workflow_dispatch:  # 允许手动触发
+        - cron: "0 0 * * *" # 每天 00:00 UTC（香港时间 08:00）
+    workflow_dispatch: # 允许手动触发
+
+permissions:
+    contents: write # merge-upstream 需要 Contents: write
+
+concurrency:
+    group: fork-sync
+    cancel-in-progress: false
 
 jobs:
     sync_with_upstream:
         name: Sync with Upstream
         runs-on: ubuntu-latest
         if: ${{ github.event.repository.fork }}
+        env:
+            UPSTREAM_REPO: huangxd-/danmu_api
+            UPSTREAM_BRANCH: main
+            TARGET_BRANCH: main
 
         steps:
-            - name: Checkout target repo
-              uses: actions/checkout@v5
-              with:
-                token: ${{ secrets.GITHUB_TOKEN }}
-
-            - name: Sync Upstream
-              uses: aormsby/Fork-Sync-With-Upstream-action@v3.4.3
-              with:
-                  target_repo_token: ${{ secrets.GITHUB_TOKEN }}
-                  upstream_sync_repo: huangxd-/danmu_api
-                  upstream_sync_branch: main
-                  target_sync_branch: main
-                  test_mode: false
-
-            - name: Check for new commits
-              if: success()
-              run: echo "Sync completed successfully"
-
-            - name: Check for Failure
-              if: failure()
+            - name: Show state before sync
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
               run: |
-                  echo "[Error] Sync failed. This might be due to:"
-                  echo "1. Changes in the upstream workflow file"
-                  echo "2. Merge conflicts that need manual resolution"
-                  echo "3. Network issues"
-                  echo "Please check the logs and consider manual sync if needed."
-                  exit 1
+                  set -euo pipefail
+                  echo "fork    : ${GITHUB_REPOSITORY}:${TARGET_BRANCH}"
+                  echo "upstream: ${UPSTREAM_REPO}:${UPSTREAM_BRANCH}"
+                  fork_sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${TARGET_BRANCH}" --jq .sha)
+                  upstream_sha=$(gh api "repos/${UPSTREAM_REPO}/commits/${UPSTREAM_BRANCH}" --jq .sha)
+                  echo "fork head     = ${fork_sha}"
+                  echo "upstream head = ${upstream_sha}"
+                  # compare 以 upstream 为 base、fork 为 head：behind_by 即 fork 落后的提交数
+                  gh api "repos/${UPSTREAM_REPO}/compare/${UPSTREAM_BRANCH}...${GITHUB_REPOSITORY%%/*}:${TARGET_BRANCH}" \
+                      --jq '"behind_by=\(.behind_by) ahead_by=\(.ahead_by) status=\(.status)"' || true
+
+            - name: Sync fork with upstream (server-side merge)
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  set -uo pipefail
+                  body=$(mktemp)
+                  code=$(curl -sS -o "$body" -w '%{http_code}' \
+                      -X POST \
+                      -H "Accept: application/vnd.github+json" \
+                      -H "Authorization: Bearer ${GH_TOKEN}" \
+                      -H "X-GitHub-Api-Version: 2022-11-28" \
+                      "https://api.github.com/repos/${GITHUB_REPOSITORY}/merge-upstream" \
+                      -d "{\"branch\":\"${TARGET_BRANCH}\"}")
+                  echo "HTTP ${code}"
+                  cat "$body"; echo
+                  {
+                      echo "### Fork Sync"
+                      echo ""
+                      echo "- HTTP: \`${code}\`"
+                      echo "- response: \`$(tr -d '\n' < "$body")\`"
+                  } >> "$GITHUB_STEP_SUMMARY"
+
+                  case "$code" in
+                      200)
+                          # merge_type 为 none 表示本来就已经是最新，不算失败
+                          echo "::notice::sync ok: $(tr -d '\n' < "$body")"
+                          ;;
+                      409)
+                          echo "::error::上游与本 fork 存在真实冲突（HTTP 409），需要在本地 merge 后手动推送。"
+                          exit 1
+                          ;;
+                      *)
+                          echo "::error::merge-upstream 失败（HTTP ${code}）。若为 403/422，请检查本仓库 Settings → Actions → General → Workflow permissions。"
+                          exit 1
+                          ;;
+                  esac
+
+            - name: Verify sync result
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  set -euo pipefail
+                  fork_sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${TARGET_BRANCH}" --jq .sha)
+                  upstream_sha=$(gh api "repos/${UPSTREAM_REPO}/commits/${UPSTREAM_BRANCH}" --jq .sha)
+                  echo "fork head     = ${fork_sha}"
+                  echo "upstream head = ${upstream_sha}"
+                  {
+                      echo "- fork head: \`${fork_sha}\`"
+                      echo "- upstream head: \`${upstream_sha}\`"
+                  } >> "$GITHUB_STEP_SUMMARY"
+                  if [ "$fork_sha" = "$upstream_sha" ]; then
+                      echo "::notice::fork 已与上游完全一致"
+                  else
+                      behind=$(gh api "repos/${UPSTREAM_REPO}/compare/${UPSTREAM_BRANCH}...${GITHUB_REPOSITORY%%/*}:${TARGET_BRANCH}" --jq .behind_by)
+                      echo "::warning::fork 仍落后上游 ${behind} 个提交（可能上游刚有新提交，或需要手动处理冲突）"
+                  fi
