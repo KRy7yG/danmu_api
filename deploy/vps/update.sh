@@ -20,11 +20,11 @@ git merge --ff-only "origin/$BRANCH"
 after="$(git rev-parse HEAD)"
 
 if [ "$before" = "$after" ]; then
-  echo "[$(date -Is)] 已是最新 ($after)"
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] 已是最新 ($after)"
   exit 0
 fi
 
-echo "[$(date -Is)] 发现更新 $before -> $after"
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] 发现更新 $before -> $after"
 "${COMPOSE[@]}" up -d --build --force-recreate
 docker image prune -f >/dev/null 2>&1 || true
-echo "[$(date -Is)] 重建完成"
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] 重建完成"
