@@ -273,7 +273,7 @@ export class Envs {
    * @returns {Array} 合并配置数组 [{primary: 'dandan', secondaries: ['bahamut', 'animeko']}, {primary: 'renren', secondaries: ['hanjutv']}, {primary: 'renren', secondaries: []}]
    */
   static resolveMergeSourcePairs() {
-    const config = this.get('MERGE_SOURCE_PAIRS', '', 'string');
+    const config = this.get('MERGE_SOURCE_PAIRS', 'dandan&animeko&bahamut', 'string');
     if (!config) return [];
     
     // 使用正则同时支持分号(;)和逗号(,)作为配置组的分隔符
