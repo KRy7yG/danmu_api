@@ -19,6 +19,7 @@ danmu_api 万能反代 —— Python 标准库版（零依赖，适合小盘 VPS
 """
 
 import os
+import ssl
 import sys
 import urllib.error
 import urllib.parse
@@ -42,6 +43,24 @@ if not SECRET:
 PREFIX = "/" + SECRET + "/"
 SKIP_REQ_HEADERS = {"host", "connection", "content-length", "accept-encoding", "transfer-encoding"}
 SKIP_RES_HEADERS = {"transfer-encoding", "connection", "content-length", "keep-alive"}
+
+
+def _urlopen(req):
+    """先按标准校验证书；若目标站点证书链有问题（例如 rrsp.com.cn），
+    退化为不校验证书重试一次——这些是中国弹幕源的公共接口，用自签/错配证书很常见。"""
+    try:
+        return urllib.request.urlopen(req, timeout=TIMEOUT)
+    except urllib.error.URLError as e:
+        reason = getattr(e, "reason", None)
+        text = str(reason) + str(e)
+        if isinstance(reason, ssl.SSLError) or "CERTIFICATE_VERIFY_FAILED" in text or "certificate verify failed" in text:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
+            sys.stderr.write("[proxy] TLS verify failed, retrying insecure: %s\n" % req.full_url)
+            return opener.open(req, timeout=TIMEOUT)
+        raise
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -129,7 +148,7 @@ class Handler(BaseHTTPRequestHandler):
         req = urllib.request.Request(target, data=body, headers=headers, method=self.command)
 
         try:
-            with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            with _urlopen(req) as resp:
                 payload = resp.read()
                 status = resp.status
                 res_headers = resp.headers
