@@ -41,6 +41,7 @@ if not SECRET:
     sys.exit(1)
 
 PREFIX = "/" + SECRET + "/"
+PROXY_VERSION = "2026-10-27.tls-fallback"
 SKIP_REQ_HEADERS = {"host", "connection", "content-length", "accept-encoding", "transfer-encoding"}
 SKIP_RES_HEADERS = {"transfer-encoding", "connection", "content-length", "keep-alive"}
 
@@ -120,7 +121,7 @@ class Handler(BaseHTTPRequestHandler):
         raw_path = self.path
         if not raw_path.startswith(PREFIX):
             if raw_path in ("/", ""):
-                return self._json(200, {"ok": True, "usage": "/{SECRET}/https://target/path"})
+                return self._json(200, {"ok": True, "version": PROXY_VERSION, "usage": "/{SECRET}/https://target/path"})
             return self._json(403, {"error": "forbidden"})
 
         target = raw_path[len(PREFIX):]
@@ -175,8 +176,8 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     server.daemon_threads = True
-    print("[proxy] listening on :%d  prefix /%s/  hosts=%s"
-          % (PORT, SECRET, ",".join(ALLOW_HOSTS) if ALLOW_HOSTS else "(all)"))
+    print("[proxy] v%s listening on :%d  prefix /%s/  hosts=%s"
+          % (PROXY_VERSION, PORT, SECRET, ",".join(ALLOW_HOSTS) if ALLOW_HOSTS else "(all)"))
     handler = getattr(server, "serve_forever", None)
     if handler:
         handler()
