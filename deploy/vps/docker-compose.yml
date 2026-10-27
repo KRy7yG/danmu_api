@@ -1,0 +1,44 @@
+# VPS 部署用的 compose 文件
+# 默认只跑「万能反代」（给 Vercel 上的 danmu_api 用）。
+# 想连 danmu_api 本体一起跑：docker compose --profile app up -d --build
+name: danmu-vps
+
+services:
+  proxy:
+    image: node:22-alpine
+    container_name: danmu-proxy
+    restart: unless-stopped
+    working_dir: /repo
+    command: ["node", "proxy/node-proxy.js"]
+    environment:
+      SECRET: ${PROXY_SECRET:?必须设置 PROXY_SECRET（见 .env.example）}
+      PORT: "8787"
+      ALLOW_HOSTS: ${PROXY_ALLOW_HOSTS:-}
+      TIMEOUT_MS: ${PROXY_TIMEOUT_MS:-20000}
+    volumes:
+      # 仓库以只读方式挂进来，反代代码随 git pull 更新
+      - ../../:/repo:ro
+    ports:
+      - "${PROXY_PORT:-8787}:8787"
+
+  app:
+    profiles: ["app"]
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: danmu-api
+    restart: unless-stopped
+    depends_on:
+      - proxy
+    environment:
+      TOKEN: ${DANMU_TOKEN:-87654321}
+      ADMIN_TOKEN: ${DANMU_ADMIN_TOKEN:-}
+      SOURCE_ORDER: ${SOURCE_ORDER:-dandan,bilibili,animeko,bahamut,aiyifan,maiduidui,360,renren,hanjutv}
+      MERGE_SOURCE_PAIRS: ${MERGE_SOURCE_PAIRS:-dandan&animeko&bahamut}
+      SEARCH_CACHE_MINUTES: ${SEARCH_CACHE_MINUTES:-3}
+      # 由 install.sh 自动填成 @http://proxy:8787/<PROXY_SECRET>；也可手动覆盖成外部反代
+      PROXY_URL: ${PROXY_URL:-}
+    volumes:
+      - ./data/.cache:/app/.cache
+    ports:
+      - "${DANMU_PORT:-9321}:9321"
