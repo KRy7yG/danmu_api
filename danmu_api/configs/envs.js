@@ -224,7 +224,7 @@ export class Envs {
    * @returns {Array} 源排序数组
    */
   static resolveSourceOrder() {
-    let sourceOrder = this.get('SOURCE_ORDER', 'dandan,bilibili,animeko,bahamut', 'string');
+    let sourceOrder = this.get('SOURCE_ORDER', 'dandan,bilibili,animeko,bahamut,aiyifan,maiduidui', 'string');
 
     const orderArr = sourceOrder
       .split(',')
