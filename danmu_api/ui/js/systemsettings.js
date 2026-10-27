@@ -18,6 +18,15 @@ const UI_THEMES = {
 const UI_THEME_STORAGE_KEY = 'logvar_ui_theme';
 const UI_SCHEME_STORAGE_KEY = 'logvar_ui_color_scheme';
 
+// 系统管理接口需要 ADMIN_TOKEN：命中 401 时给出统一提示，避免被当成普通失败反复重试
+function isAdminAuthError(status, result) {
+    return status === 401 || (result && result.errorCode === 401);
+}
+
+function alertAdminTokenRequired() {
+    customAlert('系统管理接口需要有效的 ADMIN_TOKEN。\\n\\n请先在服务端配置 ADMIN_TOKEN，再通过 /{ADMIN_TOKEN}/ 访问本页后重试。');
+}
+
 function getStoredTheme() {
     try {
         const theme = String(localStorage.getItem(UI_THEME_STORAGE_KEY) || '').toLowerCase();
@@ -43,6 +52,7 @@ function applyTheme(theme) {
     const normalizedTheme = String(theme || '').toLowerCase();
     const selectedTheme = Object.prototype.hasOwnProperty.call(UI_THEMES, normalizedTheme) ? normalizedTheme : 'lavender';
     document.body.dataset.theme = selectedTheme;
+    document.documentElement.dataset.theme = selectedTheme;
 
     document.querySelectorAll('[data-theme-option]').forEach(button => {
         const isSelected = button.dataset.themeOption === selectedTheme;
@@ -84,7 +94,8 @@ async function selectTheme(theme) {
     }
 }
 
-applyTheme(getStoredTheme() || document.body.dataset.theme || 'lavender');
+const initialTheme = getStoredTheme() || document.body.dataset.theme;
+if (initialTheme) applyTheme(initialTheme);
 
 // 导出当前管理员可见的环境变量配置
 async function exportSystemConfig() {
@@ -209,15 +220,21 @@ function normalizeImportedConfig(data) {
 }
 
 async function saveImportedConfigValue(key, value) {
-    const request = (endpoint) => fetch(buildApiUrl(endpoint), {
+    // 系统管理接口必须携带 ADMIN_TOKEN（buildApiUrl 第二参数为 true）
+    const request = (endpoint) => fetch(buildApiUrl(endpoint, true), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ key, value })
-    }).then(response => response.json());
+    }).then(async response => ({ status: response.status, result: await response.json() }));
 
-    let result = await request('/api/env/set');
+    let { status, result } = await request('/api/env/set');
+    if (isAdminAuthError(status, result)) {
+        const hint = result?.errorMessage || '需要有效的 ADMIN_TOKEN';
+        result = { ...result, success: false, message: hint, errorMessage: hint };
+        return result;
+    }
     if (!result.success) {
-        result = await request('/api/env/add');
+        ({ result } = await request('/api/env/add'));
     }
     return result;
 }
@@ -845,10 +862,10 @@ function renderValueInput(item) {
                 \${shouldShowMergeMode ? \`
                 <div class="merge-mode-controls">
                     <div class="merge-mode-btn" id="merge-mode-toggle" onclick="toggleMergeMode()">
-                        \${uiIcon('link')} 开启合并模式
+                        \${uiIcon('link')} 合并模式
                     </div>
                     <div class="form-help" style="margin: 0; margin-left: 10px;">
-                        开启后点击下方选项将添加到暂存区,组合后点击 √ 确认
+                        点击开启/关闭，在暂存区组合后添加。
                     </div>
                 </div>
 
@@ -1764,12 +1781,12 @@ function toggleMergeMode() {
 
     if (isMergeMode) {
         btn.classList.add('active');
-        btn.innerHTML = uiIcon('unlink') + ' 合并模式已开启，点击关闭';
+        btn.innerHTML = uiIcon('unlink') + ' 合并模式';
         stagingArea.classList.add('active');
         renderStagingArea();
     } else {
         btn.classList.remove('active');
-        btn.innerHTML = uiIcon('link') + ' 点击开启合并模式';
+        btn.innerHTML = uiIcon('link') + ' 合并模式';
         stagingArea.classList.remove('active');
         stagingTags = [];
     }
@@ -2555,15 +2572,20 @@ function deleteEnv(category, index, deleteButton) {
             deleteButton.disabled = true;
 
             // 调用API删除环境变量
-            fetch(buildApiUrl('/api/env/del'), {
+            fetch(buildApiUrl('/api/env/del', true), {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({ key })
             })
-            .then(response => response.json())
-            .then(result => {
+            .then(async response => ({ status: response.status, result: await response.json() }))
+            .then(({ status, result }) => {
+                if (isAdminAuthError(status, result)) {
+                    addLog(\`删除配置项失败: \${result.errorMessage || '需要有效的 ADMIN_TOKEN'}\`, 'error');
+                    alertAdminTokenRequired();
+                    return;
+                }
                 if (result.success) {
                     // 从本地数据中删除
                     envVariables[category].splice(index, 1);
@@ -2662,7 +2684,7 @@ document.getElementById('env-form').addEventListener('submit', async function(e)
             return;
         }
         // 首先尝试使用set接口更新
-        let response = await fetch(buildApiUrl('/api/env/set'), {
+        let response = await fetch(buildApiUrl('/api/env/set', true), {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -2672,9 +2694,16 @@ document.getElementById('env-form').addEventListener('submit', async function(e)
 
         let result = await response.json();
 
+        // 系统管理接口需要 ADMIN_TOKEN，鉴权失败时不再回落 add 接口
+        if (isAdminAuthError(response.status, result)) {
+            addLog(\`操作失败: \${result.errorMessage || '需要有效的 ADMIN_TOKEN'}\`, 'error');
+            alertAdminTokenRequired();
+            return;
+        }
+
         if (!result.success) {
             // 如果set接口失败，尝试使用add接口
-            response = await fetch(buildApiUrl('/api/env/add'), {
+            response = await fetch(buildApiUrl('/api/env/add', true), {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -2683,6 +2712,12 @@ document.getElementById('env-form').addEventListener('submit', async function(e)
             });
 
             result = await response.json();
+
+            if (isAdminAuthError(response.status, result)) {
+                addLog(\`操作失败: \${result.errorMessage || '需要有效的 ADMIN_TOKEN'}\`, 'error');
+                alertAdminTokenRequired();
+                return;
+            }
         }
 
         if (result.success) {
