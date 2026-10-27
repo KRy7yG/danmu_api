@@ -224,7 +224,7 @@ export class Envs {
    * @returns {Array} 源排序数组
    */
   static resolveSourceOrder() {
-    let sourceOrder = this.get('SOURCE_ORDER', 'dandan,bilibili,animeko,bahamut,aiyifan,maiduidui', 'string');
+    let sourceOrder = this.get('SOURCE_ORDER', 'dandan,bilibili,animeko,bahamut,aiyifan', 'string');
 
     const orderArr = sourceOrder
       .split(',')
@@ -273,7 +273,7 @@ export class Envs {
    * @returns {Array} 合并配置数组 [{primary: 'dandan', secondaries: ['bahamut', 'animeko']}, {primary: 'renren', secondaries: ['hanjutv']}, {primary: 'renren', secondaries: []}]
    */
   static resolveMergeSourcePairs() {
-    const config = this.get('MERGE_SOURCE_PAIRS', 'dandan&bilibili&animeko&bahamut&aiyifan&maiduidui', 'string');
+    const config = this.get('MERGE_SOURCE_PAIRS', 'dandan&bilibili&animeko&bahamut&aiyifan', 'string');
     if (!config) return [];
     
     // 使用正则同时支持分号(;)和逗号(,)作为配置组的分隔符
