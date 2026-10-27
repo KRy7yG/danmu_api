@@ -1,0 +1,153 @@
+name: Fork Sync (upstream)
+
+# 每天把上游 huangxd-/danmu_api 的最新代码同步进本 fork 的 main。
+#
+# 为什么需要这个工作流（背景）：
+#   上游自带 .github/workflows/sync_fork.yml，原理是在 runner 里 git push 上游提交到 fork。
+#   推送身份是 GITHUB_TOKEN —— 也就是 GitHub Actions App 的 installation token，它永远拿不到
+#   "workflows" 写权限（GitHub 的硬限制，不是 permissions 漏配）。自上游加入
+#   .github/workflows/test.yml 之后，那次 push 就被 git 服务器拒绝：
+#     ! [remote rejected] main -> main (refusing to allow a GitHub App to create or update
+#       workflow `.github/workflows/test.yml` without `workflows` permission)
+#   实测官方 fork 同步接口 POST /repos/{owner}/{repo}/merge-upstream（网页 "Sync fork" 按钮用的
+#   同一个接口）用 GITHUB_TOKEN 调用也会 422 报同一句话。所以任何只依赖 GITHUB_TOKEN 的
+#   全量镜像方案都不可能成功。
+#
+# 本工作流的做法：
+#   1. 拉取上游 main，merge 进 fork（--no-commit）；
+#   2. 把 .github/workflows/ 下被上游改动的文件还原成 fork 自己的版本 —— 这样这次 push 的内容
+#      完全不包含 workflow 文件改动，GITHUB_TOKEN 就能推；
+#   3. 即使上游只改了 workflow 文件，也提交一个空 merge commit，保证 fork 的祖先关系跟上游一致
+#      （GitHub 页面不会一直显示 "behind"）。
+#
+# 代价：fork 的 .github/workflows/ 不会跟随上游更新（例如上游新增的 test.yml 不会进来）。
+#   这些文件只影响 fork 自己的 CI，不影响 danmu_api 运行时功能。若需要完整镜像（含 CI 文件），
+#   改用带 workflow 权限的 PAT 调用 merge-upstream 接口即可，详见仓库 README 的自建说明。
+#
+# 注意：上游自带的 sync_fork.yml 已用 `gh workflow disable` 关掉，否则它每天都会失败报警。
+
+on:
+    schedule:
+        - cron: "0 0 * * *" # 每天 00:00 UTC（香港时间 08:00）
+    workflow_dispatch: # 允许手动触发
+
+permissions:
+    contents: write
+
+concurrency:
+    group: fork-sync
+    cancel-in-progress: false
+
+jobs:
+    sync_with_upstream:
+        name: Sync with Upstream
+        runs-on: ubuntu-latest
+        if: ${{ github.event.repository.fork }}
+        env:
+            UPSTREAM_REPO: huangxd-/danmu_api
+            UPSTREAM_BRANCH: main
+            TARGET_BRANCH: main
+
+        steps:
+            - name: Checkout fork
+              uses: actions/checkout@v5
+              with:
+                  fetch-depth: 0
+
+            - name: Merge upstream (excluding workflow files)
+              run: |
+                  set -euo pipefail
+                  git config user.name "github-actions[bot]"
+                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+                  git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+                  git fetch --no-tags --prune upstream "${UPSTREAM_BRANCH}"
+
+                  before=$(git rev-parse HEAD)
+                  upstream=$(git rev-parse "upstream/${UPSTREAM_BRANCH}")
+                  echo "fork head     = ${before}"
+                  echo "upstream head = ${upstream}"
+
+                  if git merge-base --is-ancestor "$upstream" HEAD; then
+                      echo "::notice::fork 已包含上游全部提交，无需同步"
+                      {
+                          echo "### Fork Sync"
+                          echo ""
+                          echo "- 结果：已是最新（fork 包含上游 \`${upstream:0:7}\`）"
+                      } >> "$GITHUB_STEP_SUMMARY"
+                      exit 0
+                  fi
+
+                  # --no-commit: 先不提交，方便逐文件处理；冲突时下面单独判断
+                  set +e
+                  git merge --no-ff --no-commit "upstream/${UPSTREAM_BRANCH}"
+                  rc=$?
+                  set -e
+                  echo "git merge rc=${rc}"
+
+                  if [ -n "$(git ls-files -u)" ]; then
+                      echo "::error::上游与本 fork 在代码文件上存在真实冲突："
+                      git diff --name-only --diff-filter=U | sed 's/^/  conflict: /'
+                      git merge --abort || true
+                      exit 1
+                  fi
+
+                  # 关键步骤：把 upstream 对 .github/workflows/ 的改动全部还原成 HEAD（fork）的版本，
+                  # 让这次 push 不包含任何 workflow 文件改动。
+                  git diff --name-status --no-renames HEAD "upstream/${UPSTREAM_BRANCH}" -- .github/workflows |
+                      while IFS=$'\t' read -r status path; do
+                          [ -z "${path:-}" ] && continue
+                          case "$status" in
+                              A)
+                                  # 上游新增的 workflow 文件：从暂存区和工作区一并移除
+                                  git rm -q -f --ignore-unmatch --cached "$path" >/dev/null 2>&1 || true
+                                  rm -f "$path"
+                                  ;;
+                              *)
+                                  # 修改 / 删除 / 类型变化：恢复 fork 当前版本
+                                  git checkout HEAD -- "$path"
+                                  ;;
+                          esac
+                          echo "kept fork version: ${path} (${status})"
+                      done
+
+                  msg="chore(sync): 跟随上游 ${UPSTREAM_REPO} 至 ${upstream:0:7}"
+                  if git diff --cached --quiet; then
+                      echo "本次上游改动只涉及 workflow 文件，提交空 merge commit 以记录祖先关系"
+                      git commit -q --allow-empty -m "$msg"
+                  else
+                      git commit -q -m "$msg"
+                  fi
+
+                  echo "new fork head = $(git rev-parse HEAD)"
+                  git log --oneline -3
+
+            - name: Push to fork
+              run: |
+                  set -euo pipefail
+                  git push origin "HEAD:${TARGET_BRANCH}"
+
+            - name: Verify sync result
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  set -euo pipefail
+                  fork_sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${TARGET_BRANCH}" --jq .sha)
+                  upstream_sha=$(gh api "repos/${UPSTREAM_REPO}/commits/${UPSTREAM_BRANCH}" --jq .sha)
+                  compare=$(gh api "repos/${UPSTREAM_REPO}/compare/${UPSTREAM_BRANCH}...${GITHUB_REPOSITORY%%/*}:${TARGET_BRANCH}" --jq '"behind_by=\(.behind_by) ahead_by=\(.ahead_by) status=\(.status)"')
+                  echo "fork head     = ${fork_sha}"
+                  echo "upstream head = ${upstream_sha}"
+                  echo "compare       = ${compare}"
+                  {
+                      echo "### Fork Sync"
+                      echo ""
+                      echo "- fork head: \`${fork_sha}\`"
+                      echo "- upstream head: \`${upstream_sha}\`"
+                      echo "- compare: \`${compare}\`"
+                      echo "- 说明：\`.github/workflows/\` 保持 fork 自己的版本（GITHUB_TOKEN 无法推送 workflow 文件）"
+                  } >> "$GITHUB_STEP_SUMMARY"
+                  if [ "${compare#behind_by=0 }" != "$compare" ]; then
+                      echo "::notice::fork 已包含上游全部提交"
+                  else
+                      echo "::warning::fork 仍落后上游（${compare}），请检查日志"
+                  fi
