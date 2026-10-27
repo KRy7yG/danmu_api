@@ -1,0 +1,9 @@
+# 构建上下文里不需要的东西——少传几百 MB，构建更快、层更少
+.git
+.github
+node_modules
+.cache
+dist
+deploy/vps/data
+**/*.log
+**/.DS_Store

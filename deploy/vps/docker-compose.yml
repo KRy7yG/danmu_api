@@ -25,7 +25,8 @@ services:
     profiles: ["app"]
     build:
       context: ../..
-      dockerfile: Dockerfile
+      # 用本 fork 的精简 Dockerfile（装完依赖清 npm 缓存），不改上游那份
+      dockerfile: deploy/vps/Dockerfile
     container_name: danmu-api
     restart: unless-stopped
     depends_on:
